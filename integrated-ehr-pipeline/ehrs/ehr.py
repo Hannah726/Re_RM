@@ -26,7 +26,7 @@ class EHR(object):
         self.cfg = cfg
 
         self.cache = cfg.cache
-        cache_dir = os.path.expanduser("~/.cache/ehr")
+        cache_dir = os.path.expanduser("~/scratch/.cache/ehr")
         if not os.path.exists(cache_dir):
             os.makedirs(cache_dir)
         self.cache_dir = cache_dir
@@ -240,11 +240,11 @@ class EHR(object):
             "Start labeling cohorts for predictive tasks."
         )
         
-        labeled_cohorts = cohorts[[
+        # Build column list conditionally based on enabled tasks
+        columns = [
             self.hadm_key,
             self.icustay_key,
             self.patient_key,
-            "readmission",
             "LOS",
             "INTIME",
             "OUTTIME",
@@ -253,7 +253,13 @@ class EHR(object):
             "HOS_DISCHARGE_LOCATION",
             "GENDER",
             "AGE",
-        ]].copy()
+        ]
+        
+        # Only include readmission column if readmission task is enabled
+        if self.readmission:
+            columns.append("readmission")
+        
+        labeled_cohorts = cohorts[columns].copy()
 
         # mortality prediction
         # if the discharge location of an icustay is 'Death'

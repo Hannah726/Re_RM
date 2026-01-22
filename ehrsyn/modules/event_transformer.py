@@ -4,6 +4,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+# torch.backends.cuda.enable_flash_sdp(True)
 from tqdm import tqdm
 from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from ..modules import register_model, MODEL_REGISTRY

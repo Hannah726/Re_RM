@@ -1,10 +1,17 @@
 import os
+import sys
 import argparse
 import pandas as pd
 from rapidfuzz.distance import Levenshtein
 from rapidfuzz import process
-from utils.convert_table_to_text import load_tables
+
+# Add the MTTSeval directory to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from utils.configs import get_config
+from utils.convert_table_to_text import load_tables
 
 def filter_columnwise_outliers(real_df, syn_df, numeric_columns, pid_col):
     """Filters out rows in syn_df where any numeric column value is outside the min-max range observed in real_df."""
@@ -34,7 +41,12 @@ def filter_columnwise_categorical_vocab(real_df, syn_df, col_type, threshold, pi
     dropped_stay_ids = set()
     categorical_columns = col_type.get("categorical_columns", [])
     
-    for col in categorical_columns:
+    # Skip itemid column validation - it was converted from numeric ID to text description during preprocessing
+    # and cannot be matched back to numeric IDs without a mapping table
+    itemid_columns = ["itemid"]  # Columns that should skip strict validation
+    categorical_columns_to_validate = [col for col in categorical_columns if col not in itemid_columns]
+    
+    for col in categorical_columns_to_validate:
         # Ensure columns are strings for matching
         real_df[col] = real_df[col].astype(str)
         syn_df[col] = syn_df[col].astype(str)
@@ -94,15 +106,15 @@ def filter_itemwise_outliers(real_df, syn_df, icol, numeric_columns, pid_col):
 
     discarded_rows = syn_df_with_limits[out_of_bounds_mask]
 
-    # Step 4: Collect unique `stay_id` values from discarded rows
-    dropped_ids = discarded_rows['stay_id'].unique()
+    # Step 4: Collect unique pid_col values from discarded rows
+    dropped_ids = discarded_rows[pid_col].unique()
 
     # Step 5: Remove rows with invalid values and cleanup temporary columns
     syn_df_filtered = syn_df_with_limits[
-        ~syn_df_with_limits['stay_id'].isin(dropped_ids)
+        ~syn_df_with_limits[pid_col].isin(dropped_ids)
     ].drop(columns=[f"{col}_min" for col in numeric_columns] + [f"{col}_max" for col in numeric_columns])
 
-    print(f"Step 3 - {icol}-wise numeric outliers removed: {len(dropped_ids)} stay_ids")
+    print(f"Step 3 - {icol}-wise numeric outliers removed: {len(dropped_ids)} {pid_col}s")
 
     return syn_df_filtered, dropped_ids
 
@@ -160,7 +172,7 @@ def filter_itemwise_categorical_vocab(real_df, syn_df, icol, col_type, threshold
     # Drop temporary columns
     syn_df_filtered.drop(columns=[f'{col}_valid' for col in categorical_columns], inplace=True)
 
-    print(f"Step 4 - {icol}-wise categorical vocab validation removed: {len(dropped_stay_ids)} stay_ids")
+    print(f"Step 4 - {icol}-wise categorical vocab validation removed: {len(dropped_stay_ids)} {pid_col}s")
     
     return syn_df_filtered, dropped_stay_ids
 
@@ -201,11 +213,79 @@ def main(config, cut=False, cut_samples=None):
         #     continue
         print(f"\nProcessing table: {table_name}")
 
+        # Get dataframes (may have been filtered by load_tables)
         real_df = real_dfs[table_name]
-        real_df = real_df[real_df[pid_col].isin(train_indices)]
         syn_df = syn_dfs[table_name]
         
-        numeric_columns = col_type[table_name]["numeric_columns"]
+        # Check if real_df has pid_col, if not, try to map from cohort file
+        # Note: load_tables now preserves hadm_id/subject_id, so we can map directly
+        if pid_col not in real_df.columns:
+            # Try to map from cohort file (hadm_id/subject_id should be preserved by load_tables)
+            cohort_file = os.path.join(real_data_root, f"{ehr}_cohort.csv")
+            if os.path.exists(cohort_file):
+                # Load cohort file only once (cache it if processing multiple tables)
+                if not hasattr(main, '_cohort_cache'):
+                    main._cohort_cache = pd.read_csv(cohort_file, low_memory=False)
+                cohort_df = main._cohort_cache
+                
+                # Try to map via hadm_id or subject_id
+                if 'hadm_id' in real_df.columns and 'hadm_id' in cohort_df.columns:
+                    mapping = cohort_df.set_index('hadm_id')[pid_col].to_dict()
+                    real_df[pid_col] = real_df['hadm_id'].map(mapping)
+                    print(f"  Mapped {pid_col} from cohort file via hadm_id")
+                elif 'subject_id' in real_df.columns and 'subject_id' in cohort_df.columns:
+                    # Use first stay_id for each subject_id
+                    mapping = cohort_df.groupby('subject_id')[pid_col].first().to_dict()
+                    real_df[pid_col] = real_df['subject_id'].map(mapping)
+                    print(f"  Mapped {pid_col} from cohort file via subject_id")
+                else:
+                    raise ValueError(
+                        f"Cannot map {pid_col} for table {table_name}: missing hadm_id or subject_id.\n"
+                        f"Available columns in real data: {list(real_df.columns)[:10]}..."
+                    )
+            else:
+                raise ValueError(f"Real data missing '{pid_col}' column and cohort file not found: {cohort_file}")
+        
+        # Filter real_df to training indices only
+        real_df = real_df[real_df[pid_col].isin(train_indices)].copy()
+        
+        # Now filter to common columns (after mapping is done)
+        # syn_df should already have pid_col and time_col (preserved by load_tables)
+        if pid_col not in syn_df.columns:
+            raise ValueError(f"Synthetic data for table {table_name} is missing required column '{pid_col}'")
+        if pid_col not in real_df.columns:
+            raise ValueError(f"Real data for table {table_name} is missing required column '{pid_col}' after mapping")
+        
+        # Get common columns (pid_col should be in both now)
+        common_columns = [col for col in syn_df.columns if col in real_df.columns]
+        
+        # Ensure pid_col and time_col are included if they exist in both
+        for col in [pid_col, time_col]:
+            if col in syn_df.columns and col in real_df.columns and col not in common_columns:
+                common_columns.append(col)
+        
+        if len(common_columns) == 0:
+            raise ValueError(
+                f"Table {table_name} has no common columns between real and synthetic data.\n"
+                f"Real columns: {list(real_df.columns)[:10]}...\n"
+                f"Synthetic columns: {list(syn_df.columns)[:10]}..."
+            )
+        
+        # Verify pid_col is in common_columns
+        if pid_col not in common_columns:
+            raise ValueError(
+                f"Column '{pid_col}' is missing from common columns for table {table_name}.\n"
+                f"Real columns: {list(real_df.columns)}\n"
+                f"Synthetic columns: {list(syn_df.columns)}\n"
+                f"Common columns: {common_columns}"
+            )
+        
+        # Filter to common columns only
+        real_df = real_df[common_columns].copy()
+        syn_df = syn_df[common_columns].copy()
+        
+        # Get numeric columns that exist in both dataframes
+        numeric_columns = [col for col in col_type[table_name]["numeric_columns"] if col in common_columns]
 
         # Step 1: Filter columnwise numeric outliers
         if 1 in postprocess_steps:

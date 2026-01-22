@@ -134,11 +134,49 @@ def load_tables(config):
     synthetic_dataframes = {}
 
     for table_name in table_names:
-        # Load data
-        real_df = pd.read_csv(os.path.join(real_data_root, f"{table_name}.csv"))
-        synthetic_df = pd.read_csv(os.path.join(syn_data_root, f"{table_name}.csv"))
+        # Load data with optimized parameters
+        # Use low_memory=False to avoid dtype warnings and improve performance
+        real_df = pd.read_csv(os.path.join(real_data_root, f"{table_name}.csv"), low_memory=False)
+        synthetic_df = pd.read_csv(os.path.join(syn_data_root, f"{table_name}.csv"), low_memory=False)
 
-        synthetic_df = synthetic_df[real_df.columns]
+        # Get pid_col and time_col from config (needed for postprocessing)
+        pid_col = config.get("pid_column", "stay_id")
+        time_col = config.get("time_column", "time")
+        
+        # Preserve mapping columns (hadm_id, subject_id) in real_df even if not in synthetic data
+        # These are needed for mapping stay_id later
+        mapping_cols = ['hadm_id', 'subject_id']
+        real_preserve_cols = [col for col in mapping_cols if col in real_df.columns]
+        
+        # Only keep columns that exist in both dataframes
+        # This handles cases where synthetic data may have different columns
+        common_columns = [col for col in synthetic_df.columns if col in real_df.columns]
+        
+        # Always preserve pid_col and time_col in synthetic data, even if not in real data yet
+        # (real data may get these columns later via mapping)
+        for col in [pid_col, time_col]:
+            if col in synthetic_df.columns and col not in common_columns:
+                common_columns.append(col)
+        
+        # Also preserve mapping columns in real_df (needed for postprocessing)
+        for col in real_preserve_cols:
+            if col not in common_columns:
+                common_columns.append(col)
+        
+        if len(common_columns) == 0:
+            raise ValueError(
+                f"Table {table_name} has no common columns between real and synthetic data.\n"
+                f"Real columns: {list(real_df.columns)}\n"
+                f"Synthetic columns: {list(synthetic_df.columns)}"
+            )
+        
+        # Filter real_df to common columns (only columns that exist in real_df)
+        real_common_columns = [col for col in common_columns if col in real_df.columns]
+        real_df = real_df[real_common_columns].copy()
+        
+        # Filter synthetic_df to common columns (only columns that exist in synthetic_df)
+        syn_common_columns = [col for col in common_columns if col in synthetic_df.columns]
+        synthetic_df = synthetic_df[syn_common_columns].copy()
         
         if config["sample"]:
             real_df = real_df.iloc[:10000]

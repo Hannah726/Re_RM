@@ -98,63 +98,109 @@ class Trainer:
                     
     def train(self):
         
-        self.early_stopping = utils.EarlyStopping(
-            patience=self.patience, 
-            compare=self.criterion.compare,
-            metric=self.criterion.update_target
-            )
-
-        for epoch in range(self.c_epoch, self.n_epochs):
-            self.model.train()
+        # 编码模式：只编码数据，不训练
+        if self.config.get('encode_only_mode', False):
+            saver = utils.SaveNumpy(self.config, self.ckpt_name)
+            self.model.eval()
+            dataloader = self.data_loaders['total']
+            logger.info(f"编码模式：处理 {len(dataloader.dataset)} 个样本")
             
-            for sample in tqdm.tqdm(self.data_loaders['train']):
-                self.optimizer.zero_grad(set_to_none=True)
-                net_output, targets = self.model(**sample['net_input'])
-                
-                loss = self.criterion('loss', net_output, targets)
-                loss['total_loss'].backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5)
-
-                self.optimizer.step()
-                
-                with torch.no_grad():
-                    acc = self.criterion('acc', net_output, targets)
-
             with torch.no_grad():
-                epoch_log = self.criterion.get_epoch_dict(len(self.data_loaders['train']))
-
-            summary = utils.log_from_dict(epoch_log, 'train', epoch)
-            if not self.config['debug']:
-                wandb.log(summary)
-
-            if self.scheduler_type is not None:
-                self.scheduler.step()
+                for batch in tqdm.tqdm(dataloader):
+                    # 移动数据到GPU
+                    net_input = {k: v.to(self.device) if torch.is_tensor(v) else v 
+                                 for k, v in batch['net_input'].items()}
+                    # 编码
+                    indices = self.model.module.encode_only(**net_input)
+                    # 保存
+                    saver.concat({'enc_indices': indices['enc_indices']}, {})
             
-            should_stop = self.validate(epoch)
-            if should_stop:
-                break
+            save_dir = saver.save()
+            logger.info(f'Encode-only mode completed. Results saved to {save_dir}')
+            return
+        else:
+            # 原有的完整forward逻辑
+            self.early_stopping = utils.EarlyStopping(
+                patience=self.patience, 
+                compare=self.criterion.compare,
+                metric=self.criterion.update_target
+                )
 
-        
-        self.test()
-        if not self.config['debug']:
-            wandb.finish(0)
+            for epoch in range(self.c_epoch, self.n_epochs):
+                self.model.train()
+                
+                for sample in tqdm.tqdm(self.data_loaders['train']):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    net_output, targets = self.model(**sample['net_input'])
+                    
+                    loss = self.criterion('loss', net_output, targets)
+                    loss['total_loss'].backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5)
+
+                    self.optimizer.step()
+                    
+                    with torch.no_grad():
+                        acc = self.criterion('acc', net_output, targets)
+
+                with torch.no_grad():
+                    epoch_log = self.criterion.get_epoch_dict(len(self.data_loaders['train']))
+
+                summary = utils.log_from_dict(epoch_log, 'train', epoch)
+                if not self.config['debug']:
+                    wandb.log(summary)
+
+                if self.scheduler_type is not None:
+                    self.scheduler.step()
+                
+                should_stop = self.validate(epoch)
+                if should_stop:
+                    break
+
+            
+            self.test()
+            if not self.config['debug']:
+                wandb.finish(0)
 
     def inference(self, epoch, subset, saver=None):
         self.model.eval()
 
+        # 优化：如果只保存 enc_indices，使用 encode 方法跳过解码和 logits 计算
+        only_enc_indices = False
+        if saver and hasattr(saver, 'targets'):
+            only_enc_indices = len(saver.targets) == 1 and "enc_indices" in saver.targets
+        
         with torch.no_grad():
             for sample in tqdm.tqdm(self.data_loaders[subset]):
-            
-                net_output, targets = self.model(**sample['net_input'])
+                # 移动数据到GPU
+                net_input = {k: v.to(self.device) if torch.is_tensor(v) else v 
+                             for k, v in sample['net_input'].items()}
+                if only_enc_indices:
+                    # 只编码，不解码，不计算 logits
+                    enc_indices = self.model.module.encode(**net_input)
+                    # 构造 net_output 格式以兼容 saver.concat
+                    net_output = {'enc_indices': enc_indices}
+                    targets = self.model.module.get_targets(**net_input)
+                else:
+                    # 正常 forward（包含解码和 logits 计算）
+                    net_output, targets = self.model(**net_input)
+                
                 if saver:
                     saver.concat(net_output, targets)
-                loss = self.criterion('loss', net_output, targets)
-                acc = self.criterion('acc', net_output, targets)
+                
+                # 只有在需要计算 loss/acc 时才计算（需要 logits）
+                if not only_enc_indices:
+                    loss = self.criterion('loss', net_output, targets)
+                    acc = self.criterion('acc', net_output, targets)
 
-            epoch_log = self.criterion.get_epoch_dict(len(self.data_loaders[subset]))
-            summary = utils.log_from_dict(epoch_log, subset, epoch)
-            if not self.config['debug']:
-                wandb.log(summary)
+            if only_enc_indices:
+                # 如果只保存 enc_indices，不计算 loss/acc
+                epoch_log = {}
+                summary = {}
+            else:
+                epoch_log = self.criterion.get_epoch_dict(len(self.data_loaders[subset]))
+                summary = utils.log_from_dict(epoch_log, subset, epoch)
+                if not self.config['debug']:
+                    wandb.log(summary)
 
         return epoch_log, saver
 

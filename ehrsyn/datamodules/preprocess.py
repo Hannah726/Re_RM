@@ -124,8 +124,8 @@ def main(data_path, dataset, obs_size):
         inputs = np.load(data_path.replace(".h5", "_hi_input.npy"))
         types = np.load(data_path.replace(".h5", "_hi_type.npy"))
         dpes = np.load(data_path.replace(".h5", "_hi_dpe.npy"))
-        times = np.load(data_path.replace(".h5", "_hi_time.npy"))
-        num_times = np.load(data_path.replace(".h5", "_hi_num_time.npy"))
+        times = np.load(data_path.replace(".h5", "_hi_time.npy"), allow_pickle=True)
+        num_times = np.load(data_path.replace(".h5", "_hi_num_time.npy"), allow_pickle=True)
     else:
         split_to_csv(data_path)
         

@@ -1,5 +1,6 @@
 import re
 import os
+import sys
 import math
 import argparse
 import collections
@@ -11,6 +12,11 @@ from transformers import AutoTokenizer
 from rapidfuzz.distance import Levenshtein
 from rapidfuzz import process
 from multiprocessing import Pool, cpu_count
+
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from utils.configs import get_config
 
 
@@ -72,6 +78,40 @@ class TokenUtils:
             return result
         else:
             return cell
+    
+    @staticmethod
+    def normalize_categorical_value(value, valid_vocab=None):
+        """
+        Normalize categorical value to match real data format.
+        Handles case, spacing, and format differences.
+        """
+        if not isinstance(value, str):
+            # Convert to string, handling float/int edge cases
+            if isinstance(value, float) and value.is_integer():
+                value = str(int(value))
+            else:
+                value = str(value)
+        
+        # Remove extra spaces
+        value = ' '.join(value.split())
+        
+        # If valid_vocab is provided, try to find closest match
+        if valid_vocab is not None:
+            valid_vocab_list = list(valid_vocab) if not isinstance(valid_vocab, list) else valid_vocab
+            # Try exact match first (case-insensitive)
+            for v in valid_vocab_list:
+                if str(v).lower() == value.lower():
+                    return str(v)
+            
+            # Try fuzzy match (more lenient for case/spacing differences)
+            try:
+                match = process.extractOne(value, valid_vocab_list, scorer=Levenshtein.normalized_distance)
+                if match and match[1] <= 0.3:  # Allow for case/spacing differences
+                    return str(match[0])
+            except:
+                pass
+        
+        return value
 
 # Main class for evaluating samples
 class TableEvaluator:
@@ -84,17 +124,190 @@ class TableEvaluator:
         self.pid_col = config["pid_column"]
         self.time_col = config["time_column"]
         
-        # Load predefined vocabulary
-        self.p_vocab = pd.read_pickle(os.path.join(self.config["real_data_root"], self.config["predef_vocab"]))
         self.p_token = {"table": 1, "column": 2, "content": 3}
+        # Load col_type first (needed for vocabulary generation)
         self.col_type = pd.read_pickle(os.path.join(self.config["real_data_root"], self.config["col_type"]))
-        self.mapping_func = pd.read_pickle(os.path.join(self.config["real_data_root"], f"{self.config['ehr']}_id2word.pkl"))
+        
+        # Load predefined vocabulary
+        predef_vocab_path = os.path.join(self.config["real_data_root"], self.config["predef_vocab"])
+        if os.path.exists(predef_vocab_path):
+            self.p_vocab = pd.read_pickle(predef_vocab_path)
+        else:
+            # Generate vocabulary from real data if file doesn't exist
+            print(f"Warning: {predef_vocab_path} not found. Generating vocabulary from real data...")
+            self.p_vocab = self._generate_vocab_from_real_data()
+        
+        mapping_func_path = os.path.join(self.config["real_data_root"], f"{self.config['ehr']}_id2word.pkl")
+        if os.path.exists(mapping_func_path):
+            self.mapping_func = pd.read_pickle(mapping_func_path)
+        else:
+            print(f"Warning: {mapping_func_path} not found. Using empty mapping.")
+            self.mapping_func = {}
         
         # Recovery options
         self.recovery = config["recovery"]
         self.recovery_save = config["recovery_save"]
         if self.recovery_save:
             assert self.recovery, "Recovery must be enabled if recovery_save is set to True"
+        
+        # Build itemid text-to-ID mapping for tables that need it
+        self.itemid_mapping = self._build_itemid_mapping()
+
+    def _generate_vocab_from_real_data(self):
+        """
+        Generate vocabulary from real data CSV files.
+        Returns a dictionary with structure: {table_name: {column_name: [any_value, is_numeric]}}
+        """
+        vocab = {}
+        table_names = self.config.get("table_names", ["labevents", "inputevents", "prescriptions"])
+        
+        for table_name in table_names:
+            csv_path = os.path.join(self.config["real_data_root"], f"{table_name}.csv")
+            if not os.path.exists(csv_path):
+                print(f"Warning: {csv_path} not found, skipping {table_name}")
+                continue
+            
+            # Only read column names (nrows=0 is much faster than reading data)
+            df_header = pd.read_csv(csv_path, nrows=0)
+            vocab[table_name] = {}
+            
+            # Get column types from col_type (more reliable than inferring from data)
+            numeric_cols = set()
+            if table_name in self.col_type:
+                numeric_cols = set(self.col_type[table_name].get("numeric_columns", []))
+            
+            for col in df_header.columns:
+                # Skip ID and time columns
+                if col in [self.pid_col, self.time_col]:
+                    continue
+                
+                # Determine if column is numeric (use col_type as primary source)
+                is_numeric = col in numeric_cols
+                vocab[table_name][col] = [None, is_numeric]
+        
+        print(f"Generated vocabulary for {len(vocab)} tables")
+        return vocab
+
+    def _build_itemid_mapping(self):
+        """
+        Build mapping from itemid text descriptions to numeric IDs.
+        Only needed for labevents and inputevents tables.
+        Returns: {table_name: {text_label: itemid}}
+        """
+        mapping = {}
+        
+        # Map for labevents: use d_labitems.csv
+        # Try to find raw data root from real_data_root (go up 2 levels from processed_12)
+        raw_data_root = self.config.get("raw_data_root", "")
+        if not raw_data_root:
+            # Infer from real_data_root: if real_data_root is data/processed_12, raw is data/raw
+            real_data_root = self.config.get("real_data_root", "")
+            if real_data_root:
+                # Try common patterns: data/processed_12 -> data/raw
+                if "processed" in real_data_root:
+                    raw_data_root = real_data_root.replace("processed", "raw")
+                elif "processed_12" in real_data_root:
+                    raw_data_root = real_data_root.replace("processed_12", "raw")
+                else:
+                    # Try going up one level and then to raw
+                    parent_dir = os.path.dirname(real_data_root)
+                    raw_data_root = os.path.join(parent_dir, "raw")
+        
+        d_labitems_path = os.path.join(raw_data_root, "MIMIC-IV", "hosp", "d_labitems.csv")
+        if os.path.exists(d_labitems_path):
+            try:
+                d_labitems = pd.read_csv(d_labitems_path, low_memory=False)
+                if "itemid" in d_labitems.columns and "label" in d_labitems.columns:
+                    # Create mapping: label -> itemid
+                    # Handle duplicate labels by taking the first occurrence
+                    lab_mapping = {}
+                    for _, row in d_labitems.iterrows():
+                        label = str(row["label"]).strip()
+                        itemid = row["itemid"]
+                        # Only add if label is not empty and not already mapped
+                        if label and label != "nan" and label not in lab_mapping:
+                            lab_mapping[label] = int(itemid)
+                    mapping["labevents"] = lab_mapping
+                    print(f"Built itemid mapping for labevents: {len(lab_mapping)} entries")
+            except Exception as e:
+                print(f"Warning: Failed to build labevents itemid mapping: {e}")
+        
+        # Map for inputevents: use icu/d_items.csv
+        d_items_path = os.path.join(raw_data_root, "MIMIC-IV", "icu", "d_items.csv")
+        if os.path.exists(d_items_path):
+            try:
+                d_items = pd.read_csv(d_items_path, low_memory=False)
+                if "itemid" in d_items.columns and "label" in d_items.columns:
+                    # Create mapping: label -> itemid
+                    # Handle duplicate labels by taking the first occurrence
+                    input_mapping = {}
+                    for _, row in d_items.iterrows():
+                        label = str(row["label"]).strip()
+                        itemid = row["itemid"]
+                        # Only add if label is not empty and not already mapped
+                        if label and label != "nan" and label not in input_mapping:
+                            input_mapping[label] = int(itemid)
+                    mapping["inputevents"] = input_mapping
+                    print(f"Built itemid mapping for inputevents: {len(input_mapping)} entries")
+            except Exception as e:
+                print(f"Warning: Failed to build inputevents itemid mapping: {e}")
+        
+        return mapping
+
+    def _normalize_text_for_matching(self, text):
+        """
+        Normalize text for matching: lowercase, remove punctuation, normalize spaces.
+        """
+        import re
+        text = str(text).lower().strip()
+        text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
+        text = ' '.join(text.split())  # Normalize spaces
+        return text
+    
+    def _map_itemid_text_to_id(self, table_name, text_value):
+        """
+        Map itemid text description to numeric ID using hierarchical matching strategy:
+        1. Exact match (after trimming)
+        2. Case-insensitive match
+        3. Normalized match (remove punctuation, normalize spaces)
+        4. Fuzzy match (only for longer strings, strict threshold)
+        
+        Returns the numeric ID if mapping exists, otherwise returns None.
+        """
+        if table_name not in self.itemid_mapping:
+            return None
+        
+        mapping = self.itemid_mapping[table_name]
+        text_value = str(text_value).strip()
+        
+        # Step 1: Exact match
+        if text_value in mapping:
+            return mapping[text_value]
+        
+        # Step 2: Case-insensitive match (most common case, ~87%)
+        text_lower = text_value.lower()
+        for label, itemid in mapping.items():
+            if label.lower() == text_lower:
+                return itemid
+        
+        # Step 3: Normalized match (remove punctuation, normalize spaces)
+        text_normalized = self._normalize_text_for_matching(text_value)
+        for label, itemid in mapping.items():
+            if self._normalize_text_for_matching(label) == text_normalized:
+                return itemid
+        
+        # Step 4: Fuzzy match (only for strings longer than 3 chars, strict threshold)
+        # Avoid fuzzy matching for very short strings to prevent false matches
+        if len(text_value) > 3:
+            try:
+                from rapidfuzz import process
+                match = process.extractOne(text_value, list(mapping.keys()), scorer=Levenshtein.normalized_distance)
+                if match and match[1] <= 0.2:  # Very strict: 80% similarity required
+                    return mapping[match[0]]
+            except:
+                pass
+        
+        return None
 
     def load_samples(self):
         """Load and clean input samples."""
@@ -378,7 +591,20 @@ class TableEvaluator:
                     if token_type == evaluator.p_token["table"]:
                         table_name = decoded_tokens
                     elif token_type == evaluator.p_token["column"]:
-                        current_column = decoded_tokens.replace(' ', '')
+                        # Better column name matching: try to find closest match in vocabulary
+                        decoded_col = decoded_tokens.replace(' ', '')
+                        # Try to match with predefined vocabulary
+                        if table_name in evaluator.p_vocab:
+                            try:
+                                # Find closest match in vocabulary
+                                current_column = TokenUtils.find_closest_match(
+                                    decoded_col, 
+                                    evaluator.p_vocab[table_name]
+                                )
+                            except:
+                                current_column = decoded_col
+                        else:
+                            current_column = decoded_col
                     elif token_type == evaluator.p_token["content"]:
                         try:                            
                             if current_column in evaluator.col_type[table_name]["numeric_columns"]:
@@ -387,13 +613,61 @@ class TableEvaluator:
                                 truncated_value = math.floor(value * 10000) / 10000
                                 row_data[current_column] = truncated_value
                             elif current_column in evaluator.col_type[table_name]["categorical_columns"]: 
-                                row_data[current_column] = TokenUtils.restore_text(decoded_tokens)
+                                # Restore text and normalize format
+                                restored = TokenUtils.restore_text(decoded_tokens)
+                                
+                                # Special handling for itemid columns: map text description to numeric ID
+                                item_column = evaluator.config.get("item_column", {})
+                                if table_name in item_column and current_column == item_column[table_name]:
+                                    # This is an itemid column that needs mapping
+                                    mapped_id = evaluator._map_itemid_text_to_id(table_name, restored)
+                                    if mapped_id is not None:
+                                        row_data[current_column] = mapped_id
+                                    else:
+                                        # If mapping fails, keep the text value (will be filtered in post-processing)
+                                        row_data[current_column] = restored
+                                else:
+                                    # Regular categorical column
+                                    row_data[current_column] = restored
                         except (ValueError, TypeError):
                             row_data[current_column] = None
                 
                 if table_name:
                     processed_rows.append((table_name, row_data))
         return processed_rows
+
+    def normalize_dataframe_values(self, df, table_name):
+        """
+        Normalize categorical values in DataFrame to match real data format.
+        This is a post-processing step to fix format mismatches.
+        """
+        if table_name not in self.col_type:
+            return df
+        
+        categorical_columns = self.col_type[table_name].get("categorical_columns", [])
+        
+        # Load real data to get valid vocabulary (only for normalization)
+        real_data_path = os.path.join(self.config["real_data_root"], f"{table_name}.csv")
+        if os.path.exists(real_data_path):
+            try:
+                # Read only a sample to get vocabulary
+                real_df_sample = pd.read_csv(real_data_path, nrows=10000)
+                for col in categorical_columns:
+                    if col in df.columns and col in real_df_sample.columns:
+                        # Get valid vocabulary from real data
+                        valid_vocab = set(real_df_sample[col].dropna().astype(str).unique())
+                        
+                        # Normalize values in generated data
+                        def normalize_val(val):
+                            if pd.isna(val):
+                                return val
+                            return TokenUtils.normalize_categorical_value(str(val), valid_vocab)
+                        
+                        df[col] = df[col].apply(normalize_val)
+            except Exception as e:
+                print(f"Warning: Could not normalize values for {table_name}: {e}")
+        
+        return df
 
     def parse_correct_samples_to_table(self, correct_samples, use_multiprocessing, chunk_size=100):
         """Parse correct samples into separate tables by table type, using chunk-based processing."""
@@ -425,10 +699,13 @@ class TableEvaluator:
         for table_name, row_data in results:
             tables[table_name].append(row_data)
 
-        table_dfs = {
-            table_name: pd.DataFrame(rows)
-            for table_name, rows in tables.items()
-        }
+        table_dfs = {}
+        for table_name, rows in tables.items():
+            df = pd.DataFrame(rows)
+            # Normalize categorical values to match real data format
+            df = self.normalize_dataframe_values(df, table_name)
+            table_dfs[table_name] = df
+        
         print(f"Total samples: {total_samples}, Processed samples: {len(correct_samples)}")
         return table_dfs
 

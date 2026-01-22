@@ -88,6 +88,15 @@ class EventAutoEncoder(nn.Module):
                 self.input2emb_model(**kwargs))
             vq_output = self.quantize_model(encoded)
         return vq_output['enc_indices']
+    
+    def encode_only(self, **kwargs):
+        """只进行编码，不解码"""
+        with torch.no_grad():
+            embedded = self.input2emb_model(**kwargs)
+            encoded = self.encode_model(embedded)
+            vq_output = self.quantize_model(encoded)
+            
+            return {'enc_indices': vq_output['enc_indices']}
         
     def decode(self, net_output):
         """Decode the encoded input."""

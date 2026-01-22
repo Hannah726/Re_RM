@@ -160,3 +160,15 @@ neurips.ipynb
 catboost_info/
 _deprecated/
 
+data/
+tools/
+outputs_ar/
+outputs_rqvae/
+
+archive/
+MTTSeval/
+
+*.sh
+*.pbs
+README*
+readme*

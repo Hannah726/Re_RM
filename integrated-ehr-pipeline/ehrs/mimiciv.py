@@ -308,12 +308,13 @@ class MIMICIV(EHR):
         })
 
         icustays = icustays[icustays["first_careunit"] == icustays["last_careunit"]]
-        icustays.loc[:, "INTIME"] = pd.to_datetime(
-            icustays["INTIME"], infer_datetime_format=True, utc=True
-        )
-        icustays.loc[:, "OUTTIME"] = pd.to_datetime(
-            icustays["OUTTIME"], infer_datetime_format=True, utc=True
-        )
+        icustays["INTIME"] = pd.to_datetime(
+            icustays["INTIME"], format='%Y/%m/%d %H:%M', errors='coerce'
+        ).astype('datetime64[ns]')
+
+        icustays["OUTTIME"] = pd.to_datetime(
+            icustays["OUTTIME"], format='%Y/%m/%d %H:%M', errors='coerce'
+        ).astype('datetime64[ns]')
 
         icustays = icustays.merge(patients, on="subject_id", how="left")
         icustays["AGE"] = (
@@ -332,7 +333,7 @@ class MIMICIV(EHR):
 
         icustays["discharge_location"].replace("DIED", "Death", inplace=True)
         icustays["DISCHTIME"] = pd.to_datetime(
-            icustays["DISCHTIME"], infer_datetime_format=True, utc=True
+            icustays["DISCHTIME"], format='%Y-%m-%d %H:%M:%S'
         )
 
         icustays["IN_ICU_MORTALITY"] = (

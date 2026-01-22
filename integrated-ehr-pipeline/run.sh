@@ -1,29 +1,33 @@
 #!/bin/bash
+#PBS -N rawmed_test
+#PBS -l select=1:ncpus=16:mem=256gb
+#PBS -l walltime=6:00:00
+#PBS -q normal
+#PBS -j oe
+#PBS -o /home/users/nus/e1582377/RawMed/logs/preprocess_6and24.log
 
-# Define the arrays for ehr and obs_size
-ehr_array=("mimiciv eicu")
-obs_array=(6 12 24)
+cd /home/users/nus/e1582377/RawMed/integrated-ehr-pipeline
+source ~/miniconda3/bin/activate rawmed
 
-# Loop over each combination of ehr and obs_size
-for ehr in "${ehr_array[@]}"; do
-  for obs in "${obs_array[@]}"; do
-    # Set the data folder based on the ehr value
-    if [ "$ehr" == "mimiciv" ]; then
-      data_folder="MIMIC-IV-2.0"
-    elif [ "$ehr" == "eicu" ]; then
-      data_folder="eicu-2.0"
+# 定义观测窗口数组
+obs_array=(6 24)
+
+for obs in "${obs_array[@]}"; do
+    echo "--- Preprocessing: mimic iv (obs size = $obs) ---"
+    
+    if [ $obs -eq 6 ]; then
+        MAX_EVT=200
+        MAX_PAT_TOK_LEN=25600
     else
-      echo "Unknown EHR: $ehr"
-      exit 1
+        MAX_EVT=400
+        MAX_PAT_TOK_LEN=51200
     fi
 
-    echo "Preprocessing: $ehr (obs size = $obs)"
-
-    # Execute the Python script with the current parameters
     python main.py \
-      --ehr ${ehr} \
-      --data /XXX/${data_folder} \
-      --dest /YYY/${ehr}-3t-${obs}h \
+      --ehr mimiciv \
+      --data ~/RawMed/data/raw/MIMIC-IV \
+      --dest ~/scratch/RawMed/data/processed_${obs} \
+      --ext .csv \
       --num_threads 32 \
       --readmission \
       --diagnosis \
@@ -31,10 +35,9 @@ for ehr in "${ehr_array[@]}"; do
       --first_icu \
       --mortality \
       --long_term_mortality \
-      --max_event_size 2048 \
-      --max_patient_token_len 262144 \
+      --max_event_size ${MAX_EVT} \
+      --max_event_token_len 128 \
+      --max_patient_token_len ${MAX_PAT_TOK_LEN} \
       --obs_size ${obs} \
       --pred_size 24
-
-  done
 done

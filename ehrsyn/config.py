@@ -79,6 +79,7 @@ def config():
     test_only = False
     resume = False
     debug = True
+    encode_only_mode = False
     
     # Sampling
     temperature = 1
@@ -126,13 +127,15 @@ def task_test_VQVAE_indep():
     quantizer = "vector_quantizer"
 
     drop_last_activation = True
-    batch_size = 16
+    batch_size = 32
     
     test_only = True
     debug = True
     embed_list = ["input", "type", "dpe"]
     require_gt_time=True
-    save_as_numpy='input_logits,type_logits,dpe_logits,enc_indices'
+    save_as_numpy = 'enc_indices'
+    embed_list = ["input", "type", "dpe"]
+    require_gt_time = False
 
 @ex.named_config
 def task_train_RQVAE_indep():
