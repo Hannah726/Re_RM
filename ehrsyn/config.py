@@ -160,9 +160,8 @@ def task_test_RQVAE_indep():
     test_only = True
     debug = True
     embed_list = ["input", "type", "dpe"]
-    require_gt_time=True
-    save_as_numpy='input_logits,type_logits,dpe_logits,enc_indices'
-
+    require_gt_time = True 
+    save_as_numpy = 'enc_indices' 
 
 @ex.named_config
 def task_train_AR():

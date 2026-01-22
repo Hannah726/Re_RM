@@ -242,10 +242,8 @@ class SaveNumpy:
                 num_codebooks_offset = self.config["num_codebooks"] + 3
                 time_pred -= num_codebooks_offset
                 
-                # 保持2维或3维结构，不合并成标量（与真实数据格式一致）
-                # 真实数据格式：每个样本是 (max_event_size, time_len) 的数组
-                pred = time_pred.copy()  # 保持 (batch, max_event_size, time_len) 结构
-                
+    
+                pred = time_pred.copy()  
                 # Mask for padding values
                 pad_mask = pred < 0
                 pred[pad_mask] = -100
@@ -261,12 +259,12 @@ class SaveNumpy:
         Cleans the output data by ensuring that pad events and tokens are correctly marked.
         This is done at both the event and token levels.
         """
-        # 优化：如果只有 enc_indices，跳过所有 input/type/dpe 相关的处理
+        # Optimization: if only enc_indices, skip all input/type/dpe processing
         only_enc_indices = len(self.targets) == 1 and "enc_indices" in self.targets
         
         if only_enc_indices:
-            # 只处理 enc_indices，直接 vstack 即可
-            logger.info("只保存 enc_indices，跳过 input/type/dpe 处理")
+            # Only process enc_indices, just vstack
+            logger.info("Only saving enc_indices, skipping input/type/dpe processing")
             self.output["enc_indices"] = np.vstack(self.output["enc_indices"])
             return
         
@@ -280,10 +278,10 @@ class SaveNumpy:
 
         for target in self.targets: 
             if target == "time_logits" and self.config.get("time_len", 2) in [2, 3]:
-                # 对于时间数据，保持2维或3维结构，转换为object数组（与真实数据格式一致）
-                # 将 (N, max_event_size, time_len) 转换为 object数组，每个元素是 (max_event_size, time_len)
+                # For time data, keep 2D or 3D structure, convert to object array (consistent with real data format)
+                # Convert (N, max_event_size, time_len) to object array, each element is (max_event_size, time_len)
                 time_data = np.vstack(self.output[target])  # (total_samples, max_event_size, time_len)
-                # 转换为object数组，每个样本是一个2维数组
+                # Convert to object array, each sample is a 2D array
                 time_list = [time_data[i] for i in range(time_data.shape[0])]
                 self.output[target] = np.array(time_list, dtype=object)
             else:
@@ -291,7 +289,7 @@ class SaveNumpy:
 
         if self.config["require_gt_time"]:
             if self.config.get("time_len", 2) in [2, 3]:
-                # 保持2维或3维结构
+                # Keep 2D or 3D structure
                 time_data = np.vstack(self.output["time_logits"])
                 time_list = [time_data[i] for i in range(time_data.shape[0])]
                 self.output["time_logits"] = np.array(time_list, dtype=object)
@@ -304,18 +302,18 @@ class SaveNumpy:
             items_dict = {key: item for key, item in zip(output_keys, items)}
 
             if 'time_logits' in items_dict:
-                # 处理2维或3维时间数据
+                # Handle 2D or 3D time data
                 if isinstance(items_dict['time_logits'], np.ndarray) and items_dict['time_logits'].dtype == object:
-                    # object数组格式：每个元素是一个2维数组
+                    # Object array format: each element is a 2D array
                     time_array = items_dict['time_logits']
-                    # 找到第一个全为-100的行（padding）
+                    # Find the first row that is all -100 (padding)
                     pad_event_start_idx = len(time_array)
                     for i, time_row in enumerate(time_array):
                         if np.all(time_row == -100):
                             pad_event_start_idx = i
                             break
                 else:
-                    # 1维数组格式（旧格式）
+                    # 1D array format (legacy format)
                     pad_event_indices = np.where(items_dict['time_logits'] == PAD_EVENT_ID)[0]
                     if pad_event_indices.size > 0:
                         pad_event_start_idx = pad_event_indices[0]
@@ -369,14 +367,14 @@ class StreamingSaveNumpy:
         )
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # 使用memmap进行流式写入
+        # Use memmap for streaming write
         total_samples = self._get_total_samples(dataloader)
         self.enc_indices_file = os.path.join(
             self.output_dir, 
             f"{config['ehr']}_{config['structure']}_code.npy"
         )
         
-        # 预分配空间
+        # Pre-allocate space
         shape = (
             total_samples, 
             config['max_event_size'], 
@@ -391,15 +389,15 @@ class StreamingSaveNumpy:
         self.current_idx = 0
     
     def _get_total_samples(self, dataloader=None):
-        """获取总样本数"""
+        """Get total number of samples"""
         if dataloader is not None:
-            # 如果提供了数据加载器，从数据加载器中获取
+            # If dataloader is provided, get from dataloader
             return len(dataloader.dataset)
         elif 'total_samples' in self.config:
-            # 如果配置中有总样本数，直接使用
+            # If total_samples is in config, use it directly
             return self.config['total_samples']
         else:
-            # 尝试从输入文件中读取
+            # Try to read from input file
             try:
                 input_path = self.config.get('real_input_path', self.config.get('input_path'))
                 code_file = os.path.join(
@@ -410,15 +408,15 @@ class StreamingSaveNumpy:
                     code_data = np.load(code_file, allow_pickle=True)
                     return len(code_data)
             except Exception as e:
-                logger.warning(f"无法从输入文件获取总样本数: {e}")
+                logger.warning(f"Failed to get total samples from input file: {e}")
             
-            # 如果都失败了，返回一个默认值（需要后续调整）
-            logger.warning("无法确定总样本数，使用默认值1000000，请确保实际样本数不超过此值")
+            # If all failed, return a default value (needs adjustment later)
+            logger.warning("Cannot determine total samples, using default 1000000, ensure actual samples don't exceed this")
             return 1000000
     
     def append(self, enc_indices):
-        """流式追加数据"""
-        # 处理torch tensor或numpy数组
+        """Append data in streaming fashion"""
+        # Handle torch tensor or numpy array
         if torch.is_tensor(enc_indices):
             enc_indices_np = enc_indices.detach().cpu().numpy()
         else:
@@ -427,9 +425,9 @@ class StreamingSaveNumpy:
         batch_size = enc_indices_np.shape[0]
         end_idx = self.current_idx + batch_size
         
-        # 确保不超过预分配的空间
+        # Ensure not exceeding pre-allocated space
         if end_idx > self.enc_indices_mmap.shape[0]:
-            logger.warning(f"样本数超过预分配空间 ({self.enc_indices_mmap.shape[0]})，截断到 {self.current_idx}")
+            logger.warning(f"Sample count exceeds pre-allocated space ({self.enc_indices_mmap.shape[0]}), truncating to {self.current_idx}")
             end_idx = self.enc_indices_mmap.shape[0]
             batch_size = end_idx - self.current_idx
             if batch_size <= 0:
@@ -444,17 +442,17 @@ class StreamingSaveNumpy:
         
         self.current_idx = end_idx
         
-        # 定期flush
+        # Periodic flush
         if self.current_idx % 1000 == 0:
             self.enc_indices_mmap.flush()
     
     def finalize(self):
-        """完成写入"""
+        """Finalize writing"""
         self.enc_indices_mmap.flush()
-        # 如果实际样本数小于预分配的空间，需要截断文件
+        # If actual sample count is less than pre-allocated space, truncate the file
         if self.current_idx < self.enc_indices_mmap.shape[0]:
-            logger.info(f"实际样本数 ({self.current_idx}) 小于预分配空间 ({self.enc_indices_mmap.shape[0]})，截断文件...")
-            # 使用memmap读取并保存截断后的数据
+            logger.info(f"Actual samples ({self.current_idx}) less than pre-allocated space ({self.enc_indices_mmap.shape[0]}), truncating file...")
+            # Use memmap to read and save truncated data
             temp_file = self.enc_indices_file + '.tmp'
             truncated_mmap = np.lib.format.open_memmap(
                 temp_file,
@@ -466,10 +464,10 @@ class StreamingSaveNumpy:
             truncated_mmap.flush()
             del truncated_mmap
             del self.enc_indices_mmap
-            # 替换原文件
+            # Replace original file
             import shutil
             shutil.move(temp_file, self.enc_indices_file)
-            logger.info(f"文件已截断为 ({self.current_idx}, {self.config['max_event_size']}, {self.config['spatial_dim'] * self.config['num_quantizers']})")
+            logger.info(f"File truncated to ({self.current_idx}, {self.config['max_event_size']}, {self.config['spatial_dim'] * self.config['num_quantizers']})")
         else:
             logger.info(f"Saved {self.current_idx} samples to {self.enc_indices_file}")
          

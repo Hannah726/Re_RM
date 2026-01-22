@@ -115,7 +115,7 @@ def load_data_arrays(config):
         "input": "input_reduced",
         "type": "type",
         "dpe": "dpe",
-        "time": "num_time",
+        "time": "time",
     }
         
     for embed in config['embed_list']:

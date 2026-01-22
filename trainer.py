@@ -1,3 +1,4 @@
+# trainer.py
 import os, tqdm, logging, wandb, csv
 import pandas as pd
 import numpy as np
@@ -21,10 +22,9 @@ class Trainer:
         model = ehrsyn.modules.build_model(config)
         self.model = nn.DataParallel(model).to(self.device)
         total_parameters, trainable_parameters = utils.count_parameters(self.model)
-        logger.info(self.model)
+        # logger.info(self.model)  # 调试阶段暂时注释
         logger.info(f"Total Parameters: {total_parameters:,} (Trainable: {trainable_parameters:,})")
 
-        # Data Loaders
         if "AE" in self.config["exp_name"]:
             self.data_loaders = ehrsyn_data_loader(config)
         elif "AR" in self.config["exp_name"]:
@@ -32,7 +32,6 @@ class Trainer:
         else:
             raise AssertionError("?")
 
-        # Training options
         self.n_epochs = config['n_epochs']
         self.lr = config['lr']
         self.patience = config['patience']
@@ -45,7 +44,6 @@ class Trainer:
         logger.info(self.path)
         
         if not self.config["test_only"]:
-            # self._initialize_wandb(config, self.ckpt_name)
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             utils.save_config(config, self.path)
         
@@ -97,29 +95,27 @@ class Trainer:
         wandb.run.name = ckpt_name
                     
     def train(self):
-        
-        # 编码模式：只编码数据，不训练
         if self.config.get('encode_only_mode', False):
             saver = utils.SaveNumpy(self.config, self.ckpt_name)
             self.model.eval()
             dataloader = self.data_loaders['total']
-            logger.info(f"编码模式：处理 {len(dataloader.dataset)} 个样本")
+            logger.info(f"Encode-only mode: processing {len(dataloader.dataset)} samples")
             
             with torch.no_grad():
                 for batch in tqdm.tqdm(dataloader):
-                    # 移动数据到GPU
+                    print(f"net_input keys: {net_input.keys()}")
+                    print(f"time_ids存在: {'time_ids' in net_input}")
                     net_input = {k: v.to(self.device) if torch.is_tensor(v) else v 
                                  for k, v in batch['net_input'].items()}
-                    # 编码
+                    
                     indices = self.model.module.encode_only(**net_input)
-                    # 保存
-                    saver.concat({'enc_indices': indices['enc_indices']}, {})
+                    targets = {"time_ids": net_input["time_ids"]}
+                    saver.concat({'enc_indices': indices['enc_indices']}, targets)
             
             save_dir = saver.save()
             logger.info(f'Encode-only mode completed. Results saved to {save_dir}')
             return
         else:
-            # 原有的完整forward逻辑
             self.early_stopping = utils.EarlyStopping(
                 patience=self.patience, 
                 compare=self.criterion.compare,
@@ -156,7 +152,6 @@ class Trainer:
                 if should_stop:
                     break
 
-            
             self.test()
             if not self.config['debug']:
                 wandb.finish(0)
@@ -164,36 +159,29 @@ class Trainer:
     def inference(self, epoch, subset, saver=None):
         self.model.eval()
 
-        # 优化：如果只保存 enc_indices，使用 encode 方法跳过解码和 logits 计算
         only_enc_indices = False
         if saver and hasattr(saver, 'targets'):
             only_enc_indices = len(saver.targets) == 1 and "enc_indices" in saver.targets
         
         with torch.no_grad():
             for sample in tqdm.tqdm(self.data_loaders[subset]):
-                # 移动数据到GPU
                 net_input = {k: v.to(self.device) if torch.is_tensor(v) else v 
                              for k, v in sample['net_input'].items()}
                 if only_enc_indices:
-                    # 只编码，不解码，不计算 logits
                     enc_indices = self.model.module.encode(**net_input)
-                    # 构造 net_output 格式以兼容 saver.concat
                     net_output = {'enc_indices': enc_indices}
                     targets = self.model.module.get_targets(**net_input)
                 else:
-                    # 正常 forward（包含解码和 logits 计算）
                     net_output, targets = self.model(**net_input)
                 
                 if saver:
                     saver.concat(net_output, targets)
                 
-                # 只有在需要计算 loss/acc 时才计算（需要 logits）
                 if not only_enc_indices:
                     loss = self.criterion('loss', net_output, targets)
                     acc = self.criterion('acc', net_output, targets)
 
             if only_enc_indices:
-                # 如果只保存 enc_indices，不计算 loss/acc
                 epoch_log = {}
                 summary = {}
             else:
